@@ -1,5 +1,6 @@
-import React, { useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Indicator, AuditLogEvent, AuditLogEventType } from '../types';
+import api from '../apiService';
 import { 
   X, 
   GitCommit, 
@@ -18,6 +19,7 @@ interface LineageDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   indicator: Indicator | null;
+  companyId?: string;
 }
 
 // Helper to generate mock audit logs if none exist
@@ -81,11 +83,32 @@ const generateMockAuditLog = (indicator: Indicator): AuditLogEvent[] => {
   return logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 };
 
-const LineageDrawer: React.FC<LineageDrawerProps> = ({ isOpen, onClose, indicator }) => {
-  const auditLogs = useMemo(() => {
-    if (!indicator) return [];
-    return indicator.auditLog || generateMockAuditLog(indicator);
-  }, [indicator]);
+const LineageDrawer: React.FC<LineageDrawerProps> = ({ isOpen, onClose, indicator, companyId }) => {
+  const [auditLogs, setAuditLogs] = useState<AuditLogEvent[]>([]);
+  const [isLoadingLogs, setIsLoadingLogs] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen || !indicator) return;
+    if (companyId) {
+      setIsLoadingLogs(true);
+      api.getIndicatorLineage(companyId, indicator.id)
+        .then(events => {
+          const mapped: AuditLogEvent[] = events.map(e => ({
+            id: e.id,
+            type: e.type as AuditLogEventType,
+            timestamp: e.timestamp,
+            user: e.user,
+            description: e.description,
+            metadata: e.metadata,
+          }));
+          setAuditLogs(mapped.length > 0 ? mapped : generateMockAuditLog(indicator));
+        })
+        .catch(() => setAuditLogs(generateMockAuditLog(indicator)))
+        .finally(() => setIsLoadingLogs(false));
+    } else {
+      setAuditLogs(indicator.auditLog || generateMockAuditLog(indicator));
+    }
+  }, [isOpen, indicator, companyId]);
 
   if (!isOpen || !indicator) return null;
 
@@ -218,6 +241,12 @@ const LineageDrawer: React.FC<LineageDrawerProps> = ({ isOpen, onClose, indicato
                 <History className="w-3 h-3" /> Immutable Audit Ledger
             </h3>
 
+            {isLoadingLogs ? (
+              <div className="flex items-center gap-3 text-slate-500 py-8 justify-center">
+                <div className="w-4 h-4 border-2 border-slate-600 border-t-indigo-500 rounded-full animate-spin" />
+                <span className="text-sm">Loading audit history...</span>
+              </div>
+            ) : (
             <div className="relative pl-4 space-y-6">
                 {/* Timeline Line */}
                 <div className="absolute left-[23px] top-2 bottom-2 w-px bg-slate-800"></div>
@@ -274,6 +303,7 @@ const LineageDrawer: React.FC<LineageDrawerProps> = ({ isOpen, onClose, indicato
                     </div>
                 ))}
             </div>
+            )}
           </section>
 
         </div>

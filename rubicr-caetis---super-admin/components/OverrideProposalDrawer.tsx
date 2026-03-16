@@ -11,6 +11,7 @@ import {
   AlertCircle,
   ShieldCheck
 } from 'lucide-react';
+import api from '../apiService';
 
 interface OverrideProposalDrawerProps {
   isOpen: boolean;
@@ -18,6 +19,7 @@ interface OverrideProposalDrawerProps {
   indicator: Indicator | null;
   onSubmit: (override: PendingOverride) => void;
   userRole: UserRole;
+  companyId?: string;
 }
 
 const OverrideProposalDrawer: React.FC<OverrideProposalDrawerProps> = ({ 
@@ -25,7 +27,8 @@ const OverrideProposalDrawer: React.FC<OverrideProposalDrawerProps> = ({
   onClose, 
   indicator, 
   onSubmit,
-  userRole
+  userRole,
+  companyId
 }) => {
   const [newValue, setNewValue] = useState<string>('');
   const [evidenceType, setEvidenceType] = useState<'URL' | 'FILE'>('URL');
@@ -45,21 +48,35 @@ const OverrideProposalDrawer: React.FC<OverrideProposalDrawerProps> = ({
 
   if (!isOpen || !indicator) return null;
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
+    if (!indicator) return;
     setIsSubmitting(true);
-    // Simulate API call
-    setTimeout(() => {
+    try {
+      if (companyId) {
+        await api.submitOverride({
+          company_id: companyId,
+          indicator_id: indicator.id,
+          indicator_name: indicator.name,
+          current_value: indicator.value,
+          new_value: newValue,
+          justification,
+          submitted_by: 'Current User',
+        });
+      }
       onSubmit({
         newValue,
         evidenceType,
         evidenceValue,
         justification,
         submittedAt: new Date().toISOString(),
-        submittedBy: 'Current User' // In a real app, this comes from auth context
+        submittedBy: 'Current User',
       });
-      setIsSubmitting(false);
       onClose();
-    }, 800);
+    } catch (err) {
+      console.error('Override submission failed:', err);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const isFormValid = newValue && evidenceValue && justification.length > 10;

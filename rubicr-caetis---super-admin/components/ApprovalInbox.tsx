@@ -21,6 +21,7 @@ const ApprovalInbox: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [rejectModalOpen, setRejectModalOpen] = useState<string | null>(null);
   const [rejectionReason, setRejectionReason] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
     loadApprovals();
@@ -38,10 +39,17 @@ const ApprovalInbox: React.FC = () => {
     }
   };
 
-  const filteredRequests = requests.filter(r => 
-    (activeTab === 'OVERRIDES' ? r.type === 'OVERRIDE' : r.type === 'SOURCE') &&
-    r.status === 'PENDING'
-  );
+  const filteredRequests = requests.filter(r => {
+    const matchesTab = activeTab === 'OVERRIDES' ? r.type === 'OVERRIDE' : r.type === 'SOURCE';
+    const matchesStatus = r.status === 'PENDING';
+    const q = searchQuery.toLowerCase().trim();
+    const matchesSearch = !q ||
+      (r.companyName?.toLowerCase().includes(q) ?? false) ||
+      (r.indicatorName?.toLowerCase().includes(q) ?? false) ||
+      r.submittedBy.toLowerCase().includes(q) ||
+      (r.sourceName?.toLowerCase().includes(q) ?? false);
+    return matchesTab && matchesStatus && matchesSearch;
+  });
 
   const handleApprove = async (id: string) => {
     try {
@@ -90,6 +98,8 @@ const ApprovalInbox: React.FC = () => {
                 <input 
                     type="text" 
                     placeholder="Search requests..." 
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
                     className="bg-slate-900 border border-slate-700 rounded-full pl-10 pr-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500 w-64"
                 />
             </div>

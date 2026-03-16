@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { CompanyData, Indicator } from '../types';
 import { 
   X, 
@@ -14,35 +14,64 @@ import {
   Lock,
   ArrowRightLeft
 } from 'lucide-react';
+import * as api from '../apiService';
 
 interface InterventionDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   company: CompanyData;
+  onEvidenceAdded?: () => void;
 }
 
 type Tab = 'UPLOAD' | 'OVERRIDE';
 
-const InterventionDrawer: React.FC<InterventionDrawerProps> = ({ isOpen, onClose, company }) => {
+const InterventionDrawer: React.FC<InterventionDrawerProps> = ({ isOpen, onClose, company, onEvidenceAdded }) => {
   const [activeTab, setActiveTab] = useState<Tab>('UPLOAD');
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   // --- Upload Logic ---
-  const [files, setFiles] = useState<Array<{ name: string; size: string; tag: string; status: 'PENDING' | 'PARSING' | 'DONE' }>>([]);
+  const [files, setFiles] = useState<Array<{ file: File; name: string; size: string; tag: string; status: 'PENDING' | 'PARSING' | 'DONE' | 'ERROR' }>>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+
+  const addRealFiles = (rawFiles: FileList | null) => {
+    if (!rawFiles) return;
+    const newEntries = Array.from(rawFiles).map(f => ({
+      file: f,
+      name: f.name,
+      size: f.size > 1024 * 1024 ? `${(f.size / 1024 / 1024).toFixed(1)} MB` : `${(f.size / 1024).toFixed(0)} KB`,
+      tag: '',
+      status: 'PENDING' as const,
+    }));
+    setFiles(prev => [...prev, ...newEntries]);
+  };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    // Mock file add
-    setFiles([...files, { name: 'Sustainability_Report_2024_Final.pdf', size: '4.2 MB', tag: '', status: 'PENDING' }]);
+    addRealFiles(e.dataTransfer.files);
   };
 
-  const handleProcessFiles = () => {
-    // Simulate parsing
-    setFiles(files.map(f => ({ ...f, status: 'PARSING' })));
-    setTimeout(() => {
-      setFiles(files.map(f => ({ ...f, status: 'DONE' })));
-    }, 2500);
+  const handleBrowse = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleProcessFiles = async () => {
+    const pending = files.filter(f => f.status === 'PENDING' && f.tag);
+    if (!pending.length) return;
+
+    // Set all pending to PARSING
+    setFiles(prev => prev.map(f => f.status === 'PENDING' && f.tag ? { ...f, status: 'PARSING' as const } : f));
+
+    for (const entry of pending) {
+      try {
+        await api.uploadEvidence(company.id, entry.file, entry.tag);
+        setFiles(prev => prev.map(f => f.name === entry.name && f.status === 'PARSING' ? { ...f, status: 'DONE' as const } : f));
+      } catch {
+        setFiles(prev => prev.map(f => f.name === entry.name && f.status === 'PARSING' ? { ...f, status: 'ERROR' as const } : f));
+      }
+    }
+
+    onEvidenceAdded?.();
   };
 
   const updateFileTag = (index: number, tag: string) => {
@@ -54,20 +83,49 @@ const InterventionDrawer: React.FC<InterventionDrawerProps> = ({ isOpen, onClose
   // --- Override Logic ---
   const [overrides, setOverrides] = useState<Record<string, { value: string; justification: string }>>({});
   const [simulatedScore, setSimulatedScore] = useState<number | null>(null);
+  const [overrideSubmitting, setOverrideSubmitting] = useState(false);
+  const [overrideSuccess, setOverrideSuccess] = useState(false);
 
   const handleOverrideChange = (id: string, field: 'value' | 'justification', val: string) => {
     setOverrides(prev => {
       const current = prev[id] || { value: '', justification: '' };
-      const next = { ...prev, [id]: { ...current, [field]: val } };
+      const next: Record<string, { value: string; justification: string }> = { ...prev, [id]: { ...current, [field]: val } };
       
-      // Basic simulation logic: If valid value entered, improve score
-      if (next[id].value && next[id].value !== '') {
-          setSimulatedScore(72); // Hardcoded simulation for demo "85 -> 72"
-      } else {
-          setSimulatedScore(null);
-      }
+      const hasAny = Object.values(next).some(o => o.value && o.value !== '');
+      setSimulatedScore(hasAny ? 72 : null);
       return next;
     });
+  };
+
+  const handleApplyOverrides = async () => {
+    const toSubmit = (Object.entries(overrides) as [string, { value: string; justification: string }][]).filter(([, o]) => o.value && o.justification);
+    if (!toSubmit.length) return;
+
+    setOverrideSubmitting(true);
+    try {
+      for (const [indicatorId, override] of toSubmit) {
+        const indicator = company.indicators.find(i => i.id === indicatorId);
+        if (!indicator) continue;
+        const ov = override as { value: string; justification: string };
+        await api.submitOverride({
+          company_id: company.id,
+          indicator_id: indicatorId,
+          indicator_name: indicator.name,
+          current_value: String(indicator.value),
+          new_value: ov.value,
+          justification: ov.justification,
+        });
+      }
+      setOverrideSuccess(true);
+      setTimeout(() => {
+        setOverrideSuccess(false);
+        onClose();
+      }, 1500);
+    } catch (err) {
+      console.error('Override submission failed:', err);
+    } finally {
+      setOverrideSubmitting(false);
+    }
   };
 
   // Reset state on close
@@ -77,6 +135,7 @@ const InterventionDrawer: React.FC<InterventionDrawerProps> = ({ isOpen, onClose
         setOverrides({});
         setSimulatedScore(null);
         setActiveTab('UPLOAD');
+        setOverrideSuccess(false);
     }
   }, [isOpen]);
 
@@ -145,9 +204,19 @@ const InterventionDrawer: React.FC<InterventionDrawerProps> = ({ isOpen, onClose
                         </div>
                         <h3 className="text-slate-200 font-medium mb-1">Drag & Drop Evidence</h3>
                         <p className="text-slate-500 text-sm mb-4">PDF Reports, Excel Sheets, or News Clippings</p>
-                        <button className="text-xs text-indigo-400 border border-indigo-500/30 px-3 py-1 rounded hover:bg-indigo-500/10 transition-colors">
+                        <button
+                          onClick={handleBrowse}
+                          className="text-xs text-indigo-400 border border-indigo-500/30 px-3 py-1 rounded hover:bg-indigo-500/10 transition-colors">
                             Browse Files
                         </button>
+                        <input
+                          ref={fileInputRef}
+                          type="file"
+                          multiple
+                          accept=".pdf,.xlsx,.xls,.csv"
+                          className="hidden"
+                          onChange={(e) => addRealFiles(e.target.files)}
+                        />
                     </div>
 
                     {/* File List */}
@@ -166,11 +235,15 @@ const InterventionDrawer: React.FC<InterventionDrawerProps> = ({ isOpen, onClose
                                         </div>
                                         {file.status === 'DONE' ? (
                                             <div className="text-emerald-400 flex items-center gap-1.5 text-xs font-medium bg-emerald-500/10 px-2 py-1 rounded">
-                                                <CheckCircle2 className="w-3.5 h-3.5" /> Extracted 14 Indicators
+                                                <CheckCircle2 className="w-3.5 h-3.5" /> Uploaded
+                                            </div>
+                                        ) : file.status === 'ERROR' ? (
+                                            <div className="text-red-400 flex items-center gap-1.5 text-xs font-medium bg-red-500/10 px-2 py-1 rounded">
+                                                Upload Failed
                                             </div>
                                         ) : file.status === 'PARSING' ? (
                                             <div className="text-indigo-400 flex items-center gap-1.5 text-xs font-medium">
-                                                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Parsing...
+                                                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Uploading...
                                             </div>
                                         ) : (
                                             <button onClick={() => {
@@ -211,7 +284,7 @@ const InterventionDrawer: React.FC<InterventionDrawerProps> = ({ isOpen, onClose
 
                             <button 
                                 onClick={handleProcessFiles}
-                                disabled={files.some(f => !f.tag) || files.every(f => f.status === 'DONE')}
+                                disabled={files.some(f => f.status === 'PENDING' && !f.tag) || !files.some(f => f.status === 'PENDING') || files.some(f => f.status === 'PARSING')}
                                 className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg font-medium text-sm flex items-center justify-center gap-2 shadow-lg shadow-indigo-900/20 transition-all"
                             >
                                 {files.some(f => f.status === 'PARSING') ? 'Processing...' : 'Ingest & Recalculate'}
@@ -322,10 +395,17 @@ const InterventionDrawer: React.FC<InterventionDrawerProps> = ({ isOpen, onClose
                         Cancel
                     </button>
                     <button 
-                        disabled={!simulatedScore}
+                        onClick={handleApplyOverrides}
+                        disabled={!simulatedScore || overrideSubmitting || overrideSuccess}
                         className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium shadow-lg shadow-indigo-900/20 flex items-center justify-center gap-2 transition-all"
                     >
-                        <Save className="w-4 h-4" /> Apply Overrides
+                        {overrideSuccess ? (
+                            <><CheckCircle2 className="w-4 h-4 text-emerald-400" /> Submitted!</>
+                        ) : overrideSubmitting ? (
+                            <><Loader2 className="w-4 h-4 animate-spin" /> Submitting...</>
+                        ) : (
+                            <><Save className="w-4 h-4" /> Apply Overrides</>
+                        )}
                     </button>
                 </div>
             </div>

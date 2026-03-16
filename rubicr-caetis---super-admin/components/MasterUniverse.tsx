@@ -3,7 +3,7 @@ import { CompanySummary, PipelineStatus, UserRole } from '../types';
 import { Search, Filter, MoreHorizontal, Plus, RefreshCw, LayoutGrid, List, AlertCircle, Play } from 'lucide-react';
 import AddCompanyModal from './AddCompanyModal';
 import GlobalRunPipelineModal from './GlobalRunPipelineModal';
-import api from '../apiService';
+import api, { PipelineJob } from '../apiService';
 
 interface MasterUniverseProps {
   onNavigateToCompany: (id: string) => void;
@@ -54,39 +54,31 @@ const MasterUniverse: React.FC<MasterUniverseProps> = ({ onNavigateToCompany, us
     return true;
   });
 
-  const handleStartPipeline = async (config: { dataSources: string[]; financialYears: string[]; companyIds: string[] }) => {
+  const handleStartPipeline = async (config: { dataSources: string[]; financialYears: string[]; companyIds: string[]; allYears: boolean }): Promise<PipelineJob[]> => {
     setIsRefreshing(true);
     try {
-      await api.runPipeline({
+      const jobs = await api.runPipeline({
         company_ids: config.companyIds,
         data_sources: config.dataSources,
         financial_years: config.financialYears,
+        all_years: config.allYears,
       });
       // Reload after 3s to pick up status changes
       setTimeout(() => {
         loadCompanies();
         setIsRefreshing(false);
       }, 3000);
+      return jobs;
     } catch (err) {
       console.error('Pipeline start failed:', err);
       setIsRefreshing(false);
+      throw err;
     }
   };
 
-  const handleAddCompany = async (newCompanyData: any) => {
-    try {
-      const created = await api.addCompany({
-        name: newCompanyData.name,
-        lei: newCompanyData.lei,
-        ticker: newCompanyData.ticker || '',
-        region: newCompanyData.region,
-        sector: newCompanyData.sector,
-        nse_symbol: newCompanyData.nse_symbol,
-      });
-      setCompanies(prev => [created, ...prev]);
-    } catch (err) {
-      console.error('Add company failed:', err);
-    }
+  const handleAddCompany = (created: any) => {
+    // API call already done inside AddCompanyModal — just update local state
+    setCompanies(prev => [created, ...prev]);
     setIsAddModalOpen(false);
   };
 

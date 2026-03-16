@@ -17,7 +17,8 @@ import IndicatorTable from './IndicatorTable';
 import OverrideProposalDrawer from './OverrideProposalDrawer';
 import LineageDrawer from './LineageDrawer';
 import RunPipelineModal from './RunPipelineModal';
-import api from '../apiService';
+import InterventionDrawer from './InterventionDrawer';
+import api, { PipelineJob } from '../apiService';
 
 interface CompanyDetailProps {
     onBack: () => void;
@@ -44,6 +45,10 @@ const CompanyDetail: React.FC<CompanyDetailProps> = ({ onBack, userRole, company
 
   // Run Pipeline Modal State
   const [isRunPipelineModalOpen, setIsRunPipelineModalOpen] = useState(false);
+
+  // Intervention Drawer State
+  const [isInterventionOpen, setIsInterventionOpen] = useState(false);
+  const [evidenceRefreshKey, setEvidenceRefreshKey] = useState(0);
 
   // Load company data from API
   useEffect(() => {
@@ -81,11 +86,11 @@ const CompanyDetail: React.FC<CompanyDetailProps> = ({ onBack, userRole, company
     if (companyId) loadCompany(companyId, fy);
   };
 
-  const handleStartPipeline = async (config: { dataSources: string[]; financialYears: string[] }) => {
-    if (!companyId) return;
+  const handleStartPipeline = async (config: { dataSources: string[]; financialYears: string[] }): Promise<PipelineJob[]> => {
+    if (!companyId) return [];
     setIsRefreshing(true);
     try {
-      await api.runPipeline({
+      const jobs = await api.runPipeline({
         company_ids: [companyId],
         data_sources: config.dataSources,
         financial_years: config.financialYears,
@@ -94,30 +99,17 @@ const CompanyDetail: React.FC<CompanyDetailProps> = ({ onBack, userRole, company
         if (companyId) loadCompany(companyId, selectedFY);
         setIsRefreshing(false);
       }, 3000);
+      return jobs;
     } catch (err) {
       setIsRefreshing(false);
+      throw err;
     }
   };
 
-  const handleOverrideSubmit = async (override: PendingOverride) => {
+  const handleOverrideSubmit = (override: PendingOverride) => {
     if (!overrideIndicator || !companyData) return;
 
-    // Submit to API
-    try {
-      await api.submitOverride({
-        company_id: companyData.id,
-        indicator_id: overrideIndicator.id,
-        indicator_name: overrideIndicator.name,
-        current_value: overrideIndicator.value,
-        new_value: override.newValue,
-        justification: override.justification,
-        submitted_by: 'Current User',
-      });
-    } catch (err) {
-      console.warn('Override submission warning:', err);
-    }
-
-    // Optimistic update
+    // Optimistic update — the drawer has already submitted the real API call
     setCompanyData(prev => {
       if (!prev) return prev;
       return {
@@ -211,7 +203,11 @@ const CompanyDetail: React.FC<CompanyDetailProps> = ({ onBack, userRole, company
               </button>
             )}
 
-            <button className="p-2 text-slate-400 hover:text-white transition-colors relative">
+            <button
+              onClick={() => setIsInterventionOpen(true)}
+              className="p-2 text-slate-400 hover:text-white transition-colors relative"
+              title="Manual Intervention & Override"
+            >
               <Bell className="w-5 h-5" />
               <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full"></span>
             </button>
@@ -305,7 +301,7 @@ const CompanyDetail: React.FC<CompanyDetailProps> = ({ onBack, userRole, company
                  flex-1 bg-slate-900 border border-slate-800 rounded-lg p-4 shadow-xl flex flex-col
                  ${activeTab === 'indicators' ? 'hidden lg:flex' : 'flex'}
               `}>
-                <EvidencePanel company={companyData} />
+                <EvidencePanel company={companyData} refreshKey={evidenceRefreshKey} />
               </div>
 
             </section>
@@ -336,12 +332,21 @@ const CompanyDetail: React.FC<CompanyDetailProps> = ({ onBack, userRole, company
             indicator={overrideIndicator}
             onSubmit={handleOverrideSubmit}
             userRole={userRole}
+            companyId={companyData.id}
         />
 
         <LineageDrawer
             isOpen={!!lineageIndicator}
             onClose={() => setLineageIndicator(null)}
             indicator={lineageIndicator}
+            companyId={companyData.id}
+        />
+
+        <InterventionDrawer
+            isOpen={isInterventionOpen}
+            onClose={() => setIsInterventionOpen(false)}
+            company={companyData}
+            onEvidenceAdded={() => setEvidenceRefreshKey(k => k + 1)}
         />
     </div>
   );

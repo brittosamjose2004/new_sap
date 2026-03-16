@@ -6,9 +6,10 @@ import api from '../apiService';
 
 interface EvidencePanelProps {
   company: CompanyData;
+  refreshKey?: number;
 }
 
-const EvidencePanel: React.FC<EvidencePanelProps> = ({ company }) => {
+const EvidencePanel: React.FC<EvidencePanelProps> = ({ company, refreshKey }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [localEvidence, setLocalEvidence] = useState<EvidenceItem[]>(company.evidence ?? []);
 
@@ -16,7 +17,7 @@ const EvidencePanel: React.FC<EvidencePanelProps> = ({ company }) => {
     if (company.id) {
       api.getEvidence(company.id).then(ev => setLocalEvidence(ev as EvidenceItem[])).catch(console.error);
     }
-  }, [company.id]);
+  }, [company.id, refreshKey]);
 
   const handleSourceSubmit = async (source: PendingSource) => {
     try {

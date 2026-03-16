@@ -159,3 +159,82 @@ def reject_request(req_id: str, body: ReviewDecision, db: Session = Depends(get_
     db.commit()
     company = db.query(Company).filter_by(id=req.company_id).first()
     return _approval_to_out(req, company)
+
+
+# ── GET /api/approvals/lineage/{company_id}/{indicator_id} ────────────────────
+
+@router.get("/lineage/{company_id}/{indicator_id}")
+def get_indicator_lineage(company_id: str, indicator_id: str, db: Session = Depends(get_db)):
+    """Return audit trail events for a specific indicator of a company.
+    Combines:
+      - Initial Answer extraction event (from answers table)
+      - All ApprovalRequest override history for the indicator
+    """
+    company = db.query(Company).filter_by(id=int(company_id)).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    events: list = []
+
+    # 1. Initial extraction event from the answers table
+    answer = (
+        db.query(Answer)
+        .filter_by(company_id=int(company_id), indicator_id=indicator_id)
+        .order_by(Answer.created_at.asc())
+        .first()
+    )
+    if answer:
+        events.append({
+            "id": f"extraction-{answer.id}",
+            "type": "SYSTEM_EXTRACTION",
+            "timestamp": answer.created_at.isoformat() if answer.created_at else datetime.utcnow().isoformat(),
+            "user": "System Pipeline",
+            "description": f"Initial value extracted via automated pipeline (source: {answer.source or 'system'}).",
+            "metadata": {
+                "newValue": answer.answer_value,
+                "sourceName": answer.source,
+            },
+        })
+
+    # 2. Override approval history
+    override_reqs = (
+        db.query(ApprovalRequest)
+        .filter(
+            ApprovalRequest.company_id == int(company_id),
+            ApprovalRequest.indicator_id == indicator_id,
+            ApprovalRequest.type == "OVERRIDE",
+        )
+        .order_by(ApprovalRequest.submitted_at.asc())
+        .all()
+    )
+    for req in override_reqs:
+        # Maker submission event
+        events.append({
+            "id": f"proposal-{req.id}",
+            "type": "MAKER_PROPOSAL",
+            "timestamp": req.submitted_at.isoformat() if req.submitted_at else "",
+            "user": req.submitted_by or "Unknown",
+            "description": f"Override proposed: {req.current_value} → {req.new_value}. Reason: {req.justification or 'No justification provided.'}",
+            "metadata": {
+                "previousValue": req.current_value,
+                "newValue": req.new_value,
+            },
+        })
+        # Checker review event
+        if req.reviewed_at:
+            events.append({
+                "id": f"review-{req.id}",
+                "type": "CHECKER_APPROVAL" if req.status == "APPROVED" else "SOURCE_ADDITION",
+                "timestamp": req.reviewed_at.isoformat(),
+                "user": req.reviewed_by or "Unknown",
+                "description": (
+                    f"Override approved. Live value updated to {req.new_value}."
+                    if req.status == "APPROVED"
+                    else f"Override rejected. {req.rejection_reason or ''}"
+                ),
+                "metadata": {"newValue": req.new_value},
+            })
+
+    # Sort newest first
+    events.sort(key=lambda x: x["timestamp"], reverse=True)
+    return events

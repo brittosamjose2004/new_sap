@@ -301,6 +301,30 @@ export async function deleteEvidence(companyId: string, evidenceId: string): Pro
   await request<void>('DELETE', `/api/companies/${companyId}/evidence/${evidenceId}`);
 }
 
+export async function uploadEvidence(
+  companyId: string,
+  file: File,
+  tag: string,
+): Promise<EvidenceItem> {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('tag', tag);
+  form.append('submitted_by', 'admin');
+
+  const headers: Record<string, string> = {};
+  if (_token) headers['Authorization'] = `Bearer ${_token}`;
+
+  const res = await fetch(`${BASE_URL}/api/companies/${companyId}/evidence/upload`, {
+    method: 'POST',
+    headers,
+    body: form,
+  });
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.detail ?? `HTTP ${res.status}`);
+  return { id: data.id, type: data.type, name: data.name, date: data.date, status: data.status, tags: data.tags ?? [] };
+}
+
 // ── Risk Config ────────────────────────────────────────────────────────────────
 
 export interface DriverWeight {
@@ -364,6 +388,28 @@ export async function unblockUrl(id: string): Promise<void> {
   await request<void>('DELETE', `/api/config/blocked/${id}`);
 }
 
+// ── Indicator Lineage ──────────────────────────────────────────────────────────
+
+export interface LineageEvent {
+  id: string;
+  type: 'SYSTEM_EXTRACTION' | 'MAKER_PROPOSAL' | 'CHECKER_APPROVAL' | 'SOURCE_ADDITION';
+  timestamp: string;
+  user: string;
+  description: string;
+  metadata?: {
+    previousValue?: string | number;
+    newValue?: string | number;
+    sourceName?: string;
+  };
+}
+
+export async function getIndicatorLineage(
+  companyId: string,
+  indicatorId: string,
+): Promise<LineageEvent[]> {
+  return request<LineageEvent[]>('GET', `/api/approvals/lineage/${companyId}/${indicatorId}`);
+}
+
 const api = {
   login,
   getMe,
@@ -383,6 +429,7 @@ const api = {
   getEvidence,
   addEvidence,
   deleteEvidence,
+  uploadEvidence,
   getWeights,
   updateWeights,
   getThresholds,
@@ -394,6 +441,7 @@ const api = {
   getBlockedUrls,
   blockUrls,
   unblockUrl,
+  getIndicatorLineage,
 };
 
 export default api;

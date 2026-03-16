@@ -37,23 +37,23 @@ const AddSourceModal: React.FC<AddSourceModalProps> = ({ isOpen, onClose, onSubm
 
   const handleSubmit = () => {
     setIsSubmitting(true);
-    // Simulate API call
-    setTimeout(() => {
+    try {
       onSubmit({
-        type: inputType === 'URL' ? 'URL' : 'PDF', // Simplified for demo
+        type: inputType === 'URL' ? 'URL' : 'PDF',
         value: inputValue,
         tags: [selectedTag],
         justification,
         submittedAt: new Date().toISOString(),
         submittedBy: 'Current User'
       });
-      setIsSubmitting(false);
-      onClose();
       // Reset form
       setInputValue('');
       setSelectedTag('');
       setJustification('');
-    }, 800);
+      onClose();
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const isFormValid = inputValue && selectedTag && justification.length > 10;

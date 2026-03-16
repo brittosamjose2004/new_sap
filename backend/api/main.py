@@ -10,7 +10,9 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from fastapi import FastAPI, Query
+import os
+from typing import Optional
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import httpx
@@ -117,7 +119,31 @@ def _append_record(rec: dict, results: list, seen_leis: set) -> None:
         return
     seen_leis.add(lei)
     entity = attrs.get("entity", {})
+    registration = attrs.get("registration", {})
     addr = entity.get("legalAddress", {})
+
+    # Company registration number from local registry (more meaningful than LEI)
+    company_number = entity.get("registeredAs") or ""
+
+    # Registry authority name (e.g. MCA21 for India, Companies House for UK)
+    authority_info = entity.get("registeredAt") or {}
+    authority = authority_info.get("id", "") if isinstance(authority_info, dict) else ""
+
+    # Country / jurisdiction
+    jurisdiction = entity.get("jurisdiction") or addr.get("country", "")
+
+    # Entity status — GLEIF uses ACTIVE / INACTIVE; map to human-readable
+    raw_status = entity.get("status", "")
+    current_status = {"ACTIVE": "Active", "INACTIVE": "Inactive"}.get(raw_status.upper(), raw_status.title()) if raw_status else ""
+
+    # Legal form short name
+    legal_form = (entity.get("legalForm") or {}).get("other") or ""
+
+    # Registration (LEI record) status — ISSUED means live
+    reg_status = registration.get("status", "")
+    if reg_status == "LAPSED" and current_status == "Active":
+        current_status = "Lapsed"
+
     results.append({
         "name": entity.get("legalName", {}).get("name", lei),
         "lei": lei,
@@ -129,11 +155,87 @@ def _append_record(rec: dict, results: list, seen_leis: set) -> None:
         "ticker": "",
         "region": _country_to_region(addr.get("country", "")),
         "sector": entity.get("category", "Unknown"),
-        "jurisdiction": addr.get("country", ""),
-        "incorporation_date": entity.get("creationDate", ""),
-        "company_number": lei,
-        "status": entity.get("status", ""),
+        "jurisdiction": jurisdiction,
+        "incorporation_date": (entity.get("creationDate") or "")[:10],  # strip time
+        "company_number": company_number,
+        "current_status": current_status,
+        "legal_form": legal_form,
+        "registry_authority": authority,
+        "gleif_url": f"https://search.gleif.org/#/record/{lei}",
     })
+
+
+@app.get("/api/search/gleif")
+async def search_gleif(q: str = Query(..., min_length=1), per_page: int = 20):
+    """Alias for /api/search/companies — GLEIF LEI Registry search."""
+    return await search_companies(q=q, per_page=per_page)
+
+
+@app.get("/api/search/nse-symbol")
+async def search_nse_symbol(q: str = Query(..., min_length=1)):
+    """
+    Auto-discover stock ticker for a company name using Yahoo Finance search.
+    Works for ANY globally listed company — returns NSE (.NS), BSE (.BO),
+    NYSE, NASDAQ, LSE (.L), ASX (.AX), etc.
+    e.g. GET /api/search/nse-symbol?q=Tata+Motors  →  {"symbol": "TATAMOTORS", "exchange": "NSE"}
+         GET /api/search/nse-symbol?q=Apple        →  {"symbol": "AAPL",        "exchange": "NMS"}
+         GET /api/search/nse-symbol?q=Shell        →  {"symbol": "SHEL",        "exchange": "NYQ"}
+    """
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://query2.finance.yahoo.com/v1/finance/search",
+                params={"q": q, "quotesCount": 10, "newsCount": 0, "listsCount": 0},
+                headers=headers,
+            )
+        if resp.status_code != 200:
+            return {"symbol": None, "exchange": None, "matches": []}
+
+        quotes = resp.json().get("quotes", [])
+        matches = []
+        # Priority order: NSE (.NS) > BSE (.BO) > any other equity
+        nse_match = None
+        bse_match = None
+        global_match = None
+
+        for quote in quotes:
+            if quote.get("quoteType") not in ("EQUITY", "ETF", None):
+                continue
+            sym = quote.get("symbol", "")
+            exch = quote.get("exchange", "")
+            name_str = quote.get("longname") or quote.get("shortname") or ""
+            if ".NS" in sym:
+                clean = sym.replace(".NS", "")
+                entry = {"symbol": clean, "exchange": "NSE", "full_symbol": sym, "name": name_str}
+                matches.append(entry)
+                if nse_match is None:
+                    nse_match = entry
+            elif ".BO" in sym:
+                clean = sym.replace(".BO", "")
+                entry = {"symbol": clean, "exchange": "BSE", "full_symbol": sym, "name": name_str}
+                matches.append(entry)
+                if bse_match is None:
+                    bse_match = entry
+            elif sym and exch:
+                entry = {"symbol": sym, "exchange": exch, "full_symbol": sym, "name": name_str}
+                matches.append(entry)
+                if global_match is None:
+                    global_match = entry
+
+        best = nse_match or bse_match or global_match
+        if best:
+            return {"symbol": best["symbol"], "exchange": best["exchange"],
+                    "full_symbol": best["full_symbol"], "matches": matches}
+        return {"symbol": None, "exchange": None, "matches": matches}
+    except Exception as exc:
+        return {"symbol": None, "exchange": None, "matches": [], "error": str(exc)}
 
 
 def _country_to_region(country: str) -> str:
@@ -143,3 +245,41 @@ def _country_to_region(country: str) -> str:
     if country in {"IN", "CN", "JP", "AU", "SG", "HK", "KR", "MY", "TH", "ID", "NZ", "PH"}: return "APAC"
     if country in {"BR", "AR", "CL", "CO", "PE", "MX"}: return "LATAM"
     return "EMEA"
+
+
+# ── GET /api/search/opencorporates ────────────────────────────────────────────
+
+@app.get("/api/search/opencorporates")
+def search_opencorporates(
+    q: str = Query(..., min_length=1),
+    jurisdiction: Optional[str] = None,
+    per_page: int = Query(default=20, ge=1, le=100),
+):
+    """Search companies using the OpenCorporates API.
+
+    Requires OPENCORPORATES_API_TOKEN to be set in the environment.
+    Get your token at https://opencorporates.com
+    """
+    from backend.scraper.opencorporates import search_companies
+
+    api_token = os.environ.get("OPENCORPORATES_API_TOKEN") or None
+    if not api_token:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "OpenCorporates API Token not configured. "
+                "Get your token at https://opencorporates.com, then set:\n"
+                "    export OPENCORPORATES_API_TOKEN=your_token\n"
+                "and restart the backend."
+            ),
+        )
+    try:
+        results = search_companies(
+            query=q,
+            jurisdiction_code=jurisdiction.lower() if jurisdiction else None,
+            per_page=per_page,
+            api_token=api_token,
+        )
+        return {"results": {"companies": results, "total_count": len(results)}}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))

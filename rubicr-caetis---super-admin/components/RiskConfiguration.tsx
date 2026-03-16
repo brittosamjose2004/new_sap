@@ -50,6 +50,7 @@ const RiskConfiguration: React.FC = () => {
   const [isAddSourceOpen, setIsAddSourceOpen] = useState(false);
   const [mode, setMode] = useState<'PRODUCTION' | 'DRAFT'>('PRODUCTION');
   const [isSaving, setIsSaving] = useState(false);
+  const [companyCount, setCompanyCount] = useState(0);
 
   // --- State: Blocked Sources ---
   const [blockedUrls, setBlockedUrls] = useState<{id: string, url: string, date: string}[]>([]);
@@ -111,6 +112,7 @@ const RiskConfiguration: React.FC = () => {
     api.getBlockedUrls().then(b => setBlockedUrls(b.map(u => ({
       id: u.id, url: u.url, date: u.date
     })))).catch(console.error);
+    api.getCompanies().then(c => setCompanyCount(c.length)).catch(console.error);
   }, []);
 
   const handleAddSource = async (source: { domain: string; type: 'SECONDARY' | 'TERTIARY'; subType?: string }) => {
@@ -564,6 +566,7 @@ const RiskConfiguration: React.FC = () => {
         isOpen={isSimulationOpen}
         onClose={() => setIsSimulationOpen(false)}
         onSubmit={handleSimulationSubmit}
+        companyCount={companyCount}
       />
 
       <GlobalSourceModal 

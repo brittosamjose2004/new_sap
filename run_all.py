@@ -17,7 +17,7 @@ Usage:
     python run_all.py --batch --companies TCS     # batch: specific company
     python run_all.py --year 2026                 # override latest fiscal year
     python run_all.py --num-years 5               # how many past years to fill (default 5)
-    python run_all.py --skip-download             # reuse PDFs already in /tmp/
+    python run_all.py --skip-download             # reuse previously downloaded PDFs
 
 Examples:
     python run_all.py                             # interactive, prompts all options
@@ -30,9 +30,11 @@ import sys
 import os
 import argparse
 import datetime
+import re
 import requests
 import sqlite3
 from pathlib import Path
+from urllib.parse import quote, unquote, urlparse, parse_qs
 
 # ── make backend importable ────────────────────────────────────────────────────
 ROOT = Path(__file__).parent
@@ -58,7 +60,14 @@ FISCAL_YEAR = _today.year if _today.month >= 4 else _today.year
 # Override here if you always want a specific year:
 # FISCAL_YEAR = 2026
 
-PDF_DIR = Path("/tmp")  # where downloaded PDFs are stored
+PDF_DIR = ROOT / "data" / "annual_reports"  # company-specific PDF storage root
+
+
+def _slugify_company_name(name: str) -> str:
+    """Create a filesystem-safe folder name from a company name."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", (name or "company").strip())
+    slug = slug.strip("_")
+    return slug or "company"
 
 # ── NSE PDF download ───────────────────────────────────────────────────────────
 
@@ -74,8 +83,8 @@ NSE_HEADERS = {
 }
 
 
-def _download_pdf(nse_symbol: str, dest: Path) -> bool:
-    """Download the most-recent annual report PDF from NSE. Returns True on success."""
+def _fetch_annual_report_entries(nse_symbol: str) -> list:
+    """Fetch annual-report metadata from NSE for a given symbol."""
     print(f"  [NSE] Fetching annual report list for {nse_symbol} …")
     try:
         resp = requests.get(
@@ -88,15 +97,50 @@ def _download_pdf(nse_symbol: str, dest: Path) -> bool:
         data = resp.json()
     except Exception as exc:
         print(f"  [ERROR] NSE API call failed: {exc}")
-        return False
+        return []
 
     entries = data.get("data") or []
     if not entries:
         print(f"  [ERROR] No annual report entries found for {nse_symbol}")
+        return []
+    return entries
+
+
+def _extract_entry_year(entry: dict) -> int | None:
+    """Best-effort conversion of NSE `toYr` metadata to integer year."""
+    raw = str(entry.get("toYr", "")).strip()
+    if not raw:
+        return None
+    # Typical cases: "2026", "FY2026", "2025-26"
+    m = re.search(r"(20\d{2})", raw)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(\d{2})$", raw)
+    if m:
+        return 2000 + int(m.group(1))
+    return None
+
+
+def _download_pdf(nse_symbol: str, dest: Path, target_year: int | None = None) -> bool:
+    """Download annual report PDF from NSE (specific FY when target_year is provided)."""
+    entries = _fetch_annual_report_entries(nse_symbol)
+    if not entries:
         return False
 
-    pdf_url = entries[0].get("fileName") or entries[0].get("fileUrl")
-    year_label = entries[0].get("toYr", "?")
+    selected = None
+    if target_year is not None:
+        for entry in entries:
+            if _extract_entry_year(entry) == target_year:
+                selected = entry
+                break
+        if not selected:
+            print(f"  [WARN] No NSE annual report found for {nse_symbol} FY{target_year}")
+            return False
+    else:
+        selected = entries[0]
+
+    pdf_url = selected.get("fileName") or selected.get("fileUrl")
+    year_label = selected.get("toYr", "?")
     if not pdf_url:
         print(f"  [ERROR] Could not find PDF URL in NSE response for {nse_symbol}")
         return False
@@ -123,41 +167,134 @@ def _download_pdf(nse_symbol: str, dest: Path) -> bool:
         return False
 
 
+def _is_likely_report_pdf(url: str, context: str, target_year: int) -> bool:
+    """Heuristic filter for annual/sustainability report PDF links."""
+    text = f"{url} {context}".lower()
+    if ".pdf" not in text:
+        return False
+    report_terms = [
+        "annual report", "annual-report", "integrated report", "sustainability report",
+        "ar_", "investor", "report",
+    ]
+    if not any(t in text for t in report_terms):
+        return False
+    if str(target_year) not in text and str(target_year - 1) not in text:
+        # keep strict to improve year precision and avoid random PDFs
+        return False
+    return True
+
+
+def _extract_real_url(candidate: str) -> str:
+    """Resolve wrapped search-engine links to direct target URLs where possible."""
+    try:
+        parsed = urlparse(candidate)
+        if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+            qs = parse_qs(parsed.query)
+            if "uddg" in qs and qs["uddg"]:
+                return unquote(qs["uddg"][0])
+    except Exception:
+        pass
+    return candidate
+
+
+def _download_pdf_from_web(company_name: str, target_year: int, dest: Path) -> bool:
+    """Fallback: search the web for a year-matching annual report PDF and download it."""
+    try:
+        from bs4 import BeautifulSoup
+    except Exception:
+        return False
+
+    queries = [
+        f'"{company_name}" "annual report" "{target_year}" filetype:pdf',
+        f'"{company_name}" "integrated report" "{target_year}" filetype:pdf',
+        f'"{company_name}" "sustainability report" "{target_year}" filetype:pdf',
+    ]
+    web_headers = {
+        "User-Agent": NSE_HEADERS["User-Agent"],
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    for q in queries:
+        try:
+            print(f"  [WEB]  Searching report links: {q}")
+            search_url = f"https://duckduckgo.com/html/?q={quote(q)}"
+            resp = requests.get(search_url, headers=web_headers, timeout=20)
+            if resp.status_code != 200:
+                continue
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            # Collect candidate links from result anchors.
+            candidates = []
+            for a in soup.select("a"):
+                href = (a.get("href") or "").strip()
+                text = a.get_text(" ", strip=True)
+                if not href:
+                    continue
+                real = _extract_real_url(href)
+                if not real.startswith("http"):
+                    continue
+                if _is_likely_report_pdf(real, text, target_year):
+                    candidates.append(real)
+
+            # Try candidates in order and keep the first valid PDF.
+            for url in candidates[:10]:
+                try:
+                    r = requests.get(url, headers=web_headers, timeout=120, stream=True)
+                    if r.status_code != 200:
+                        continue
+                    ctype = (r.headers.get("Content-Type") or "").lower()
+                    if "pdf" not in ctype and not url.lower().split("?")[0].endswith(".pdf"):
+                        continue
+
+                    total = 0
+                    with open(dest, "wb") as f:
+                        for chunk in r.iter_content(65536):
+                            if chunk:
+                                f.write(chunk)
+                                total += len(chunk)
+                    if total < 150_000:
+                        # Tiny files are often not actual annual reports.
+                        continue
+
+                    # Validate PDF readability quickly.
+                    try:
+                        import pypdf
+                        reader = pypdf.PdfReader(str(dest))
+                        if len(reader.pages) < 5:
+                            continue
+                    except Exception:
+                        continue
+
+                    print(f"  [WEB]  Downloaded report PDF ({total:,} bytes): {url}")
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    return False
+
+
 # ── per-company pipeline (split into scrape + questionnaire) ──────────────────
 
 def _scrape_company(name: str, nse_symbol: str, latest_year: int,
-                    skip_download: bool) -> dict:
+                    skip_download: bool, years_to_process: list[int] | None = None) -> dict:
     """
-    Step 1-3: Download PDF, verify, scrape all data into DB.
+    Step 1-3: Download PDF (if NSE-listed), then scrape Yahoo Finance data.
+    PDF step is OPTIONAL — if it fails we log a warning and continue with
+    Yahoo Finance / financial data, which works for ANY globally listed company.
     Returns dict with keys: company_name, official_name, ticker,
                             brsr_fields, history_years, error
     """
-    safe_name = nse_symbol.upper()
-    pdf_path  = PDF_DIR / f"{safe_name}_annual.pdf"
+    company_folder = PDF_DIR / _slugify_company_name(name)
+    company_folder.mkdir(parents=True, exist_ok=True)
+    safe_name = nse_symbol.upper() if nse_symbol else "ANNUAL_REPORT"
+    years_to_process = sorted(set(years_to_process or [latest_year]))
     result    = {"company_name": name, "official_name": name,
-                 "brsr_fields": 0, "history_years": [], "error": None}
+                 "brsr_fields": 0, "brsr_fields_by_year": {}, "history_years": [], "error": None}
 
-    # ── 1. Download PDF ──────────────────────────────────────────────────────
-    if skip_download and pdf_path.exists():
-        print(f"  [SKIP]  Using cached PDF: {pdf_path}")
-    else:
-        ok = _download_pdf(nse_symbol, pdf_path)
-        if not ok:
-            result["error"] = "PDF download failed"
-            return result
-
-    # ── 2. Verify PDF ────────────────────────────────────────────────────────
-    try:
-        import pypdf
-        reader = pypdf.PdfReader(str(pdf_path))
-        print(f"  [PDF]   {len(reader.pages)} pages verified OK")
-    except Exception as exc:
-        result["error"] = f"PDF unreadable: {exc}"
-        print(f"  [ERROR] PDF could not be read: {exc}")
-        return result
-
-    # ── 3. Scrape ────────────────────────────────────────────────────────────
-    print(f"  [SCRAPE] Starting (may take 60-120 s for large PDFs) …")
+    # ── 3. Scrape — always runs regardless of PDF availability ──────────────
+    print(f"  [SCRAPE] Fetching company data from Yahoo Finance …")
     from backend.database.db import init_db, get_session
     from backend.database.models import Company, ScrapedData
     from backend.scraper.company_scraper import CompanyScraper
@@ -238,17 +375,71 @@ def _scrape_company(name: str, nse_symbol: str, latest_year: int,
                 _upsert(k, v, source="yahoo_esg")
             db.commit()
 
-    # BRSR PDF → tagged to latest_year
-    brsr      = BRSRScraper(name, ticker=ticker)
-    brsr_data = brsr.parse_local_pdf(str(pdf_path))
-    if brsr_data:
-        for k, v in brsr_data.items():
-            _upsert(k, v, source="brsr_pdf", yr=latest_year)
-        db.commit()
-        result["brsr_fields"] = len(brsr_data)
-        print(f"  [BRSR]  {len(brsr_data)} fields extracted from PDF → year {latest_year}")
+    # BRSR PDF — process each selected year separately when available.
+    brsr_fields_by_year: dict[int, int] = {}
+    if nse_symbol:
+        for yr in years_to_process:
+            pdf_path = company_folder / f"{safe_name}_FY{yr}_annual.pdf"
+            pdf_available = False
+
+            if skip_download and pdf_path.exists():
+                print(f"  [SKIP]  Using cached PDF for FY{yr}: {pdf_path}")
+                pdf_available = True
+            else:
+                ok = _download_pdf(nse_symbol, pdf_path, target_year=yr)
+                if not ok:
+                    # Deep web fallback when exchange filing is missing/unavailable.
+                    ok = _download_pdf_from_web(name, yr, pdf_path)
+                if ok:
+                    pdf_available = True
+
+            if pdf_available:
+                try:
+                    import pypdf
+                    reader = pypdf.PdfReader(str(pdf_path))
+                    print(f"  [PDF]   FY{yr} verified OK ({len(reader.pages)} pages)")
+                except Exception as exc:
+                    print(f"  [WARN]  FY{yr} cached PDF unreadable: {exc} — retrying download")
+                    pdf_available = False
+                    try:
+                        if pdf_path.exists():
+                            pdf_path.unlink()
+                    except Exception:
+                        pass
+                    ok = _download_pdf(nse_symbol, pdf_path, target_year=yr)
+                    if not ok:
+                        ok = _download_pdf_from_web(name, yr, pdf_path)
+                    if ok:
+                        try:
+                            import pypdf
+                            reader = pypdf.PdfReader(str(pdf_path))
+                            print(f"  [PDF]   FY{yr} verified OK after retry ({len(reader.pages)} pages)")
+                            pdf_available = True
+                        except Exception as exc2:
+                            print(f"  [WARN]  FY{yr} retry PDF unreadable: {exc2} — skipping this year")
+
+            if not pdf_available:
+                brsr_fields_by_year[yr] = 0
+                continue
+
+            brsr = BRSRScraper(name, ticker=ticker)
+            brsr_data = brsr.parse_local_pdf(str(pdf_path))
+            if brsr_data:
+                for k, v in brsr_data.items():
+                    _upsert(k, v, source="brsr_pdf", yr=yr)
+                db.commit()
+                brsr_fields_by_year[yr] = len(brsr_data)
+                print(f"  [BRSR]  FY{yr}: {len(brsr_data)} fields extracted")
+            else:
+                brsr_fields_by_year[yr] = 0
+                print(f"  [BRSR]  FY{yr}: no fields extracted")
     else:
-        print(f"  [BRSR]  No BRSR fields extracted")
+        print(f"  [BRSR]  Skipped (no symbol available) — Yahoo Finance data only")
+        for yr in years_to_process:
+            brsr_fields_by_year[yr] = 0
+
+    result["brsr_fields_by_year"] = brsr_fields_by_year
+    result["brsr_fields"] = brsr_fields_by_year.get(latest_year, 0)
 
     result["history_years"] = history_years
     return result
@@ -291,11 +482,13 @@ def run_company(name: str, nse_symbol: str, year: int, skip_download: bool) -> d
     """Full pipeline for one company, one year."""
     print()
     print("=" * 65)
-    print(f"  COMPANY : {name}  ({nse_symbol})  |  Year: {year}")
+    print(f"  COMPANY : {name}  ({nse_symbol or 'no NSE symbol'})  |  Year: {year}")
     print("=" * 65)
 
-    scrape = _scrape_company(name, nse_symbol, year, skip_download)
-    if scrape["error"]:
+    scrape = _scrape_company(name, nse_symbol, year, skip_download, years_to_process=[year])
+    # Never abort on PDF errors — Yahoo Finance data is still useful
+    # Only abort on truly unexpected exceptions (scrape result will lack keys)
+    if scrape.get("error") and scrape.get("_fatal"):
         return {"name": name, "year": year, "error": scrape["error"],
                 "answered": 0, "smart_defaults": 0, "scraped": 0}
 
@@ -318,14 +511,34 @@ def run_company_all_years(name: str, nse_symbol: str, latest_year: int,
     print(f"  YEARS   : {latest_year - num_years + 1} → {latest_year}  ({num_years} years)")
     print("=" * 65)
 
-    scrape = _scrape_company(name, nse_symbol, latest_year, skip_download)
-    if scrape["error"]:
+    years_to_fill = list(range(latest_year - num_years + 1, latest_year + 1))
+    return run_company_selected_years(
+        name=name,
+        nse_symbol=nse_symbol,
+        years_to_fill=years_to_fill,
+        skip_download=skip_download,
+    )
+
+
+def run_company_selected_years(name: str, nse_symbol: str,
+                               years_to_fill: list[int], skip_download: bool) -> list:
+    """Process the company for an explicit list of years (exact frontend selection)."""
+    years_to_fill = sorted(set(years_to_fill))
+    latest_year = max(years_to_fill)
+
+    print()
+    print("=" * 65)
+    print(f"  COMPANY : {name}  ({nse_symbol})")
+    print(f"  YEARS   : {years_to_fill}")
+    print("=" * 65)
+
+    scrape = _scrape_company(name, nse_symbol, latest_year, skip_download, years_to_process=years_to_fill)
+    if scrape.get("error") and scrape.get("_fatal"):
         return [{"name": name, "year": yr, "error": scrape["error"],
                  "answered": 0, "smart_defaults": 0, "scraped": 0}
-                for yr in range(latest_year - num_years + 1, latest_year + 1)]
+                for yr in years_to_fill]
 
     official_name = scrape["official_name"]
-    years_to_fill = list(range(latest_year - num_years + 1, latest_year + 1))
 
     print()
     print(f"  Filling questionnaire year by year: {years_to_fill}")
@@ -341,8 +554,8 @@ def run_company_all_years(name: str, nse_symbol: str, latest_year: int,
             "answered":       q["answered"],
             "smart_defaults": q["smart_defaults"],
             "scraped_count":  q["real"],
-            # BRSR fields only available for latest_year
-            "scraped":        scrape["brsr_fields"] if yr == latest_year else 0,
+            # BRSR fields are now extracted per selected year when PDFs are available
+            "scraped":        (scrape.get("brsr_fields_by_year") or {}).get(yr, 0),
         })
 
     return results
@@ -591,8 +804,17 @@ def main():
         help=f"Latest fiscal year (default: {FISCAL_YEAR})"
     )
     parser.add_argument(
+        "--years", nargs="*", metavar="YEAR", default=None,
+        help="Exact years to process (overrides --all-years/--num-years). E.g. --years 2023 2025 2026"
+    )
+    parser.add_argument(
         "--skip-download", action="store_true",
-        help="Skip PDF download if PDF already exists in /tmp/"
+        help="Skip PDF download if a company PDF exists in data/annual_reports/"
+    )
+    parser.add_argument(
+        "--nse-symbol", metavar="SYMBOL", default=None,
+        help="Explicit NSE stock symbol for PDF download (bypasses built-in list). "
+             "E.g. --nse-symbol TATAMOTORS"
     )
     args = parser.parse_args()
 
@@ -613,20 +835,42 @@ def main():
         companies_to_run = [
             c for c in COMPANIES
             if c["nse_symbol"].upper() in filters
-            or any(f in c["name"].upper() for f in filters)
+            # bidirectional: filter contains name OR name contains filter
+            # handles "Tata Consultancy Services Ltd" matching "Tata Consultancy Services"
+            or any(
+                f in c["name"].upper() or c["name"].upper() in f
+                for f in filters
+            )
         ]
         if not companies_to_run:
-            print(f"[ERROR] No matching companies found for: {args.companies}")
-            print(f"Available: {[c['name'] for c in COMPANIES]}")
-            sys.exit(1)
+            if args.nse_symbol:
+                # Explicit NSE symbol provided — scrape ANY company directly
+                company_label = args.companies[0] if args.companies else args.nse_symbol
+                print(f"[INFO] Using explicit NSE symbol '{args.nse_symbol}' for '{company_label}'")
+                companies_to_run = [{"name": company_label, "nse_symbol": args.nse_symbol}]
+            else:
+                # No built-in match and no explicit symbol — fallback to smart defaults
+                print(f"[INFO] No built-in NSE company matches: {args.companies}")
+                print(f"[INFO] Questionnaire will be filled by the API fallback.")
+                sys.exit(0)  # exit cleanly so pipeline.py treats it as non-ERROR
 
-    years_range = f"{args.year - args.num_years + 1}–{args.year}"
+    selected_years = sorted({
+        int(y) for y in (args.years or [])
+        if str(y).strip().isdigit()
+    })
+    if not selected_years:
+        if args.all_years:
+            selected_years = list(range(args.year - args.num_years + 1, args.year + 1))
+        else:
+            selected_years = [args.year]
+
+    years_range = f"{min(selected_years)}–{max(selected_years)}" if len(selected_years) > 1 else str(selected_years[0])
     print()
     print("╔══════════════════════════════════════════════════════════════╗")
     print("║          IMPACTREE  —  Batch Pipeline Runner                 ║")
     print("╚══════════════════════════════════════════════════════════════╝")
     print(f"  Companies : {len(companies_to_run)}")
-    print(f"  Years     : {years_range if args.all_years else str(args.year)}")
+    print(f"  Years     : {years_range}")
     print(f"  PDF dir   : {PDF_DIR}")
     print(f"  DB        : {ROOT / 'data' / 'impactree.db'}")
 
@@ -635,12 +879,11 @@ def main():
 
     all_results = []
     for comp in companies_to_run:
-        if args.all_years:
-            rs = run_company_all_years(
+        if len(selected_years) > 1:
+            rs = run_company_selected_years(
                 name=comp["name"],
                 nse_symbol=comp["nse_symbol"],
-                latest_year=args.year,
-                num_years=args.num_years,
+                years_to_fill=selected_years,
                 skip_download=args.skip_download,
             )
             all_results.extend(rs)
@@ -648,12 +891,12 @@ def main():
             r = run_company(
                 name=comp["name"],
                 nse_symbol=comp["nse_symbol"],
-                year=args.year,
+                year=selected_years[0],
                 skip_download=args.skip_download,
             )
             all_results.append(r)
 
-    print_summary(all_results, multi_year=args.all_years)
+    print_summary(all_results, multi_year=(len(selected_years) > 1))
 
 
 if __name__ == "__main__":

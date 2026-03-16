@@ -7,9 +7,10 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
+import os
 from datetime import datetime
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
 from backend.api.deps import get_db
@@ -67,6 +68,67 @@ def add_evidence(company_id: str, body: AddEvidenceRequest, db: Session = Depend
         source_type=body.type,
         source_name=body.name,
         source_tags=body.tags,
+    )
+    db.add(req)
+    db.commit()
+    db.refresh(ev)
+
+    return EvidenceItemOut(
+        id=str(ev.id), type=ev.type, name=ev.name,
+        date=ev.date or "", status=ev.status, tags=ev.tags or [],
+    )
+
+
+# ── POST /api/companies/{id}/evidence/upload ─────────────────────────────────
+
+@router.post("/upload", response_model=EvidenceItemOut, status_code=status.HTTP_201_CREATED)
+async def upload_evidence_file(
+    company_id: str,
+    file: UploadFile = File(...),
+    tag: str = Form(...),
+    submitted_by: Optional[str] = Form("Unknown"),
+    db: Session = Depends(get_db),
+):
+    company = db.query(Company).filter_by(id=int(company_id)).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    # Determine file type from extension
+    ext = Path(file.filename or "file").suffix.lower()
+    type_map = {".pdf": "PDF", ".xlsx": "EXCEL", ".xls": "EXCEL", ".csv": "CSV"}
+    doc_type = type_map.get(ext, "PDF")
+
+    # Save file to disk
+    upload_dir = Path(__file__).parent.parent.parent.parent / "data" / "uploads" / company_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{Path(file.filename or 'upload').name}"
+    # Sanitize filename to prevent path traversal
+    safe_name = os.path.basename(safe_name)
+    dest = upload_dir / safe_name
+
+    contents = await file.read()
+    dest.write_bytes(contents)
+
+    # Create evidence record + approval request
+    ev = EvidenceSource(
+        company_id=int(company_id),
+        type=doc_type,
+        name=file.filename or safe_name,
+        date=datetime.utcnow().strftime("%Y-%m-%d"),
+        status="pending_review",
+        tags=[tag] if tag else [],
+    )
+    db.add(ev)
+
+    req = ApprovalRequest(
+        type="SOURCE",
+        company_id=int(company_id),
+        submitted_by=submitted_by or "Unknown",
+        justification=f"File upload: {file.filename}",
+        status="PENDING",
+        source_type=doc_type,
+        source_name=file.filename or safe_name,
+        source_tags=[tag] if tag else [],
     )
     db.add(req)
     db.commit()

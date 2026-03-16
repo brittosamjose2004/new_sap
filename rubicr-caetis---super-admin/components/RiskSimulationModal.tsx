@@ -14,10 +14,20 @@ interface RiskSimulationModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSubmit: () => void;
+  companyCount?: number;
 }
 
-const RiskSimulationModal: React.FC<RiskSimulationModalProps> = ({ isOpen, onClose, onSubmit }) => {
+const RiskSimulationModal: React.FC<RiskSimulationModalProps> = ({ isOpen, onClose, onSubmit, companyCount = 0 }) => {
   if (!isOpen) return null;
+
+  // Compute simulation stats proportionally from real company count
+  const total = companyCount;
+  const affected = Math.round(total * 0.18) || 0;
+  const upgrades = Math.round(affected * 0.27) || 0;
+  const downgrades = Math.round(affected * 0.19) || 0;
+  const medToHigh = Math.round(affected * 0.10) || 0;
+  const highToMed = Math.round(affected * 0.03) || 0;
+  const lowToMed = Math.round(affected * 0.02) || 0;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -38,7 +48,7 @@ const RiskSimulationModal: React.FC<RiskSimulationModalProps> = ({ isOpen, onClo
             </div>
             <div>
                 <h2 className="text-lg font-semibold text-white">Impact Simulation Report</h2>
-                <p className="text-xs text-slate-500">Simulating changes on Master Universe (2,450 Companies)</p>
+                <p className="text-xs text-slate-500">Simulating changes on Master Universe ({total.toLocaleString()} Companies)</p>
             </div>
           </div>
           <button 
@@ -56,21 +66,21 @@ const RiskSimulationModal: React.FC<RiskSimulationModalProps> = ({ isOpen, onClo
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div className="bg-slate-950 border border-slate-800 p-4 rounded-xl">
                     <p className="text-xs text-slate-500 uppercase tracking-wider mb-1">Total Affected</p>
-                    <div className="text-2xl font-bold text-white">450 <span className="text-sm font-normal text-slate-500">Companies</span></div>
+                    <div className="text-2xl font-bold text-white">{affected} <span className="text-sm font-normal text-slate-500">Companies</span></div>
                     <div className="text-xs text-indigo-400 mt-2 flex items-center gap-1">
-                        <Activity className="w-3 h-3" /> 18% of Universe
+                        <Activity className="w-3 h-3" /> {total > 0 ? '18' : '0'}% of Universe
                     </div>
                 </div>
                 <div className="bg-slate-950 border border-slate-800 p-4 rounded-xl">
                     <p className="text-xs text-slate-500 uppercase tracking-wider mb-1">Risk Upgrades</p>
-                    <div className="text-2xl font-bold text-emerald-400">120</div>
+                    <div className="text-2xl font-bold text-emerald-400">{upgrades}</div>
                     <div className="text-xs text-slate-500 mt-2 flex items-center gap-1">
                         <TrendingDown className="w-3 h-3 text-emerald-500" /> Moving to Lower Risk
                     </div>
                 </div>
                 <div className="bg-slate-950 border border-slate-800 p-4 rounded-xl">
                     <p className="text-xs text-slate-500 uppercase tracking-wider mb-1">Risk Downgrades</p>
-                    <div className="text-2xl font-bold text-red-400">85</div>
+                    <div className="text-2xl font-bold text-red-400">{downgrades}</div>
                     <div className="text-xs text-slate-500 mt-2 flex items-center gap-1">
                         <TrendingUp className="w-3 h-3 text-red-500" /> Moving to Higher Risk
                     </div>
@@ -97,7 +107,7 @@ const RiskSimulationModal: React.FC<RiskSimulationModalProps> = ({ isOpen, onClo
                                 <div className="absolute left-2/3 top-1/2 -translate-y-1/2 w-2 h-2 bg-red-400 rounded-full animate-[moveRight_2s_linear_infinite_1s]"></div>
                                 
                                 <div className="relative z-10 w-full text-center">
-                                    <span className="bg-slate-900 px-2 text-xs font-mono text-slate-400">45 Companies</span>
+                                    <span className="bg-slate-900 px-2 text-xs font-mono text-slate-400">{medToHigh} Companies</span>
                                 </div>
                             </div>
                             <div className="w-32">
@@ -120,7 +130,7 @@ const RiskSimulationModal: React.FC<RiskSimulationModalProps> = ({ isOpen, onClo
                                 <div className="absolute right-1/3 top-1/2 -translate-y-1/2 w-2 h-2 bg-amber-400 rounded-full animate-[moveLeft_2s_linear_infinite_0.5s]"></div>
                                 
                                 <div className="relative z-10 w-full text-center">
-                                    <span className="bg-slate-900 px-2 text-xs font-mono text-slate-400">12 Companies</span>
+                                    <span className="bg-slate-900 px-2 text-xs font-mono text-slate-400">{highToMed} Companies</span>
                                 </div>
                             </div>
                             <div className="w-32">
@@ -142,7 +152,7 @@ const RiskSimulationModal: React.FC<RiskSimulationModalProps> = ({ isOpen, onClo
                                 <div className="absolute left-0 top-1/2 -translate-y-1/2 w-2 h-2 bg-amber-400 rounded-full animate-[moveRight_3s_linear_infinite]"></div>
                                 
                                 <div className="relative z-10 w-full text-center">
-                                    <span className="bg-slate-900 px-2 text-xs font-mono text-slate-400">8 Companies</span>
+                                    <span className="bg-slate-900 px-2 text-xs font-mono text-slate-400">{lowToMed} Companies</span>
                                 </div>
                             </div>
                             <div className="w-32">

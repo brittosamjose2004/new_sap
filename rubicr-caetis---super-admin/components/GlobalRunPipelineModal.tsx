@@ -1,19 +1,54 @@
-import React, { useState } from 'react';
-import { X, Play, Check, Database, Calendar, Building2, Search } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { X, Play, Check, Database, Calendar, Building2, Search, Loader2, CheckCircle, XCircle, Activity, Clock, ToggleLeft, ToggleRight, History } from 'lucide-react';
 import { CompanySummary } from '../types';
+import * as api from '../apiService';
 
 interface GlobalRunPipelineModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onStart: (config: { dataSources: string[]; financialYears: string[]; companyIds: string[] }) => void;
+  onStart: (config: { dataSources: string[]; financialYears: string[]; companyIds: string[]; allYears: boolean }) => Promise<api.PipelineJob[]>;
   companies: CompanySummary[];
 }
 
 const GlobalRunPipelineModal: React.FC<GlobalRunPipelineModalProps> = ({ isOpen, onClose, onStart, companies }) => {
   const [selectedSources, setSelectedSources] = useState<string[]>(['Secondary']);
-  const [selectedYears, setSelectedYears] = useState<string[]>(['FY2024']);
+  const [selectedYears, setSelectedYears] = useState<string[]>(['FY2025']);
+  const [allYears, setAllYears] = useState(false);
   const [selectedCompanyIds, setSelectedCompanyIds] = useState<string[]>([]);
   const [companySearch, setCompanySearch] = useState('');
+
+  // Job tracking
+  const [isStarting, setIsStarting] = useState(false);
+  const [jobs, setJobs] = useState<api.PipelineJob[]>([]);
+  const [jobStatuses, setJobStatuses] = useState<Record<string, string>>({});
+  const [startError, setStartError] = useState<string | null>(null);
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setJobs([]);
+      setJobStatuses({});
+      setStartError(null);
+      setIsStarting(false);
+      if (pollingRef.current) clearInterval(pollingRef.current);
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (jobs.length === 0) return;
+    const poll = async () => {
+      const updates: Record<string, string> = {};
+      for (const j of jobs) {
+        try { const s = await api.getPipelineJobStatus(j.id); updates[j.id] = s.status; } catch { /* ignore */ }
+      }
+      setJobStatuses(prev => ({ ...prev, ...updates }));
+      const allDone = jobs.every(j => ['PUBLISHED', 'ERROR'].includes(updates[j.id] ?? jobStatuses[j.id] ?? ''));
+      if (allDone && pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
+    };
+    poll();
+    pollingRef.current = setInterval(poll, 3000);
+    return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
+  }, [jobs])
 
   if (!isOpen) return null;
 
@@ -54,14 +89,35 @@ const GlobalRunPipelineModal: React.FC<GlobalRunPipelineModalProps> = ({ isOpen,
     }
   };
 
-  const handleStart = () => {
-    onStart({ 
-      dataSources: selectedSources, 
-      financialYears: selectedYears, 
-      companyIds: selectedCompanyIds 
-    });
-    onClose();
+  const handleStart = async () => {
+    setIsStarting(true);
+    setStartError(null);
+    try {
+      const started = await onStart({ dataSources: selectedSources, financialYears: selectedYears, companyIds: selectedCompanyIds, allYears });
+      const init: Record<string, string> = {};
+      started.forEach(j => { init[j.id] = j.status; });
+      setJobStatuses(init);
+      setJobs(started);
+    } catch (err: any) {
+      setStartError(err.message ?? 'Failed to start pipeline');
+    } finally {
+      setIsStarting(false);
+    }
   };
+
+  const statusIcon = (s: string) => {
+    if (s === 'PUBLISHED') return <CheckCircle className="w-4 h-4 text-emerald-400" />;
+    if (s === 'ERROR') return <XCircle className="w-4 h-4 text-red-400" />;
+    if (s === 'FETCHING') return <Activity className="w-4 h-4 text-indigo-400 animate-pulse" />;
+    return <Clock className="w-4 h-4 text-slate-400 animate-pulse" />;
+  };
+  const statusColor = (s: string) => {
+    if (s === 'PUBLISHED') return 'text-emerald-400';
+    if (s === 'ERROR') return 'text-red-400';
+    if (s === 'FETCHING') return 'text-indigo-400';
+    return 'text-slate-400';
+  };
+  const allDone = jobs.length > 0 && jobs.every(j => ['PUBLISHED', 'ERROR'].includes(jobStatuses[j.id] ?? ''));
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
@@ -191,45 +247,101 @@ const GlobalRunPipelineModal: React.FC<GlobalRunPipelineModalProps> = ({ isOpen,
                 <Calendar className="w-4 h-4 text-indigo-400" />
                 <h3 className="text-sm font-bold text-slate-300 uppercase tracking-wider">Financial Years</h3>
               </div>
-              <span className="text-[10px] font-bold text-slate-500 bg-slate-800 px-2 py-1 rounded uppercase">
-                {selectedYears.length} Selected
-              </span>
+              {!allYears && (
+                <span className="text-[10px] font-bold text-slate-500 bg-slate-800 px-2 py-1 rounded uppercase">
+                  {selectedYears.length} Selected
+                </span>
+              )}
             </div>
-            <div className="grid grid-cols-4 sm:grid-cols-6 gap-2 bg-slate-950 p-4 rounded-2xl border border-slate-800">
-              {financialYears.map(year => (
-                <button
-                  key={year}
-                  onClick={() => toggleYear(year)}
-                  className={`
-                    py-2 rounded-lg text-[10px] font-mono transition-all border
-                    ${selectedYears.includes(year) 
-                      ? 'bg-indigo-500 text-white border-indigo-500 shadow-lg shadow-indigo-500/20' 
-                      : 'bg-slate-900 text-slate-500 border-slate-800 hover:border-slate-700 hover:text-slate-300'}
-                  `}
-                >
-                  {year}
-                </button>
-              ))}
-            </div>
+
+            {/* All-Years Toggle */}
+            <button
+              onClick={() => setAllYears(v => !v)}
+              className={`w-full flex items-center justify-between p-4 rounded-2xl border transition-all mb-4 ${
+                allYears
+                  ? 'bg-amber-500/10 border-amber-500/60 text-amber-400 shadow-lg shadow-amber-500/5'
+                  : 'bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-700 hover:text-slate-300'
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <History className={`w-4 h-4 ${allYears ? 'text-amber-400' : 'text-slate-500'}`} />
+                <div className="text-left">
+                  <p className="text-sm font-bold">Process All Historical Years</p>
+                  <p className="text-[10px] opacity-70 mt-0.5">Runs <code className="font-mono">run_all.py --all-years</code> — fetches & scores every year (last 5 yrs)</p>
+                </div>
+              </div>
+              {allYears
+                ? <ToggleRight className="w-8 h-8 text-amber-400 shrink-0" />
+                : <ToggleLeft className="w-8 h-8 text-slate-600 shrink-0" />}
+            </button>
+
+            {/* Individual year picker — hidden when allYears is on */}
+            {!allYears && (
+              <div className="grid grid-cols-4 sm:grid-cols-6 gap-2 bg-slate-950 p-4 rounded-2xl border border-slate-800">
+                {financialYears.map(year => (
+                  <button
+                    key={year}
+                    onClick={() => toggleYear(year)}
+                    className={`
+                      py-2 rounded-lg text-[10px] font-mono transition-all border
+                      ${selectedYears.includes(year)
+                        ? 'bg-indigo-500 text-white border-indigo-500 shadow-lg shadow-indigo-500/20'
+                        : 'bg-slate-900 text-slate-500 border-slate-800 hover:border-slate-700 hover:text-slate-300'}
+                    `}
+                  >
+                    {year}
+                  </button>
+                ))}
+              </div>
+            )}
           </section>
 
         </div>
 
         {/* Footer */}
-        <div className="p-8 border-t border-slate-800 bg-slate-900/50 backdrop-blur-md sticky bottom-0 z-10 flex gap-4">
-          <button 
-            onClick={onClose}
-            className="flex-1 px-6 py-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-2xl font-bold transition-all"
-          >
-            Cancel
-          </button>
-          <button 
-            onClick={handleStart}
-            disabled={selectedSources.length === 0 || selectedYears.length === 0 || selectedCompanyIds.length === 0}
-            className="flex-[2] px-6 py-4 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-2xl font-bold shadow-xl shadow-indigo-500/20 flex items-center justify-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
-          >
-            Start Global Pipeline <ArrowRight className="w-5 h-5" />
-          </button>
+        <div className="p-8 border-t border-slate-800 bg-slate-900/50 backdrop-blur-md sticky bottom-0 z-10 space-y-4">
+
+          {/* Job tracker */}
+          {(jobs.length > 0 || startError) && (
+            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 space-y-2 max-h-48 overflow-y-auto">
+              {startError ? (
+                <p className="text-sm text-red-400 flex items-center gap-2"><XCircle className="w-4 h-4" /> {startError}</p>
+              ) : (
+                <>
+                  <p className="text-xs text-slate-500 uppercase font-bold tracking-wider mb-2 flex items-center gap-1.5"><Activity className="w-3 h-3" /> Running Jobs ({jobs.length})</p>
+                  {jobs.map(j => (
+                    <div key={j.id} className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        {statusIcon(jobStatuses[j.id] ?? 'QUEUED')}
+                        <span className="text-sm text-slate-300">{j.company_name}</span>
+                        <span className="text-xs font-mono text-slate-600">#{j.id}</span>
+                      </div>
+                      <span className={`text-xs font-bold uppercase ${statusColor(jobStatuses[j.id] ?? 'QUEUED')}`}>{jobStatuses[j.id] ?? 'QUEUED'}</span>
+                    </div>
+                  ))}
+                  {!allDone && <p className="text-xs text-slate-600 flex items-center gap-1 pt-1"><Loader2 className="w-3 h-3 animate-spin" /> Polling every 3s…</p>}
+                </>
+              )}
+            </div>
+          )}
+
+          <div className="flex gap-4">
+            <button 
+              onClick={onClose}
+              className="flex-1 px-6 py-4 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-2xl font-bold transition-all"
+            >
+              {allDone ? 'Close' : 'Cancel'}
+            </button>
+            {jobs.length === 0 && (
+              <button 
+                onClick={handleStart}
+                disabled={selectedSources.length === 0 || (!allYears && selectedYears.length === 0) || selectedCompanyIds.length === 0 || isStarting}
+                className="flex-[2] px-6 py-4 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-2xl font-bold shadow-xl shadow-indigo-500/20 flex items-center justify-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
+              >
+                {isStarting ? <><Loader2 className="w-5 h-5 animate-spin" /> Starting…</> : <>Start Global Pipeline <ArrowRight className="w-5 h-5" /></>}
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
